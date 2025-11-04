@@ -9,6 +9,7 @@ import {
   taxesInformationService,
   kpisService 
 } from '../services/supabaseService.js'
+import { apiService } from '../services/apiService.js'
 
 // Helper to append the standard footer to every assistant response
 function appendFooter(text) {
@@ -49,10 +50,10 @@ export default function PropertyTaxAgent() {
       } catch (error) {
         console.error('Error loading initial data:', error)
         setIsLoading(false)
-        // Show error message to the user (English) with footer
+        const message = error?.message || (typeof error === 'string' ? error : 'Unknown error')
         setMessages(prev => [...prev, {
           role: 'assistant',
-          content: appendFooter('❌ Error loading data. Please verify your Supabase connection and environment variables.')
+          content: appendFooter(`❌ Error loading data: ${message}`)
         }])
       }
     }
@@ -79,6 +80,11 @@ export default function PropertyTaxAgent() {
           countyCode: '',
           existingCounty: null
         }
+      },
+      parcelSubflow: {
+        isActive: false,
+        plan: [],
+        current: null
       }
     }
   })
@@ -154,6 +160,11 @@ export default function PropertyTaxAgent() {
             countyCode: '',
             existingCounty: null
           }
+        },
+        parcelSubflow: {
+          isActive: false,
+          plan: [],
+          current: null
         }
       }
     })
@@ -282,17 +293,111 @@ export default function PropertyTaxAgent() {
   }
 
   const processParcelsInfo = (userInput) => {
-    // Simular procesamiento de parcels
+    const entries = userInput.split(',').map(s => s.trim()).filter(Boolean)
+    if (entries.length === 0) {
+      return '❌ Please provide parcel counts like: "Harris County: 2, Dallas County: 1"'
+    }
+
+    const plan = []
+    for (const entry of entries) {
+      const m = entry.match(/^(.+?):\s*(\d+)$/)
+      if (!m) {
+        return '❌ Invalid format. Use: "County Name: N". Example: "Harris County: 2"'
+      }
+      const name = m[1].trim()
+      const count = parseInt(m[2], 10)
+      const county = propertyFlow.data.counties.find(c => c.county_name.toLowerCase() === name.toLowerCase())
+      if (!county) {
+        return `❌ County "${name}" is not in the selected list.`
+      }
+      if (count <= 0) {
+        return `❌ Count for "${name}" must be > 0.`
+      }
+      plan.push({ county_id: county.id, county_name: county.county_name, remaining: count })
+    }
+
+    const first = plan[0]
     setPropertyFlow(prev => ({
       ...prev,
-      step: 4,
-      data: { 
-        ...prev.data, 
-        parcels: [{ id: 1, payable_to: 'Tax Office', account: 'ACC001', parcel: 'PARCEL001' }]
+      data: {
+        ...prev.data,
+        parcelSubflow: {
+          isActive: true,
+          plan,
+          current: { county_id: first.county_id, county_name: first.county_name, index: 1 }
+        }
       }
     }))
-    
-    return '✅ Parcels information processed!\n\n**Step 4: Lease and Taxes Information**\n\nNow let\'s complete the lease and taxes information:\n\n1. Tenancy Type (Leased, Owned or Subleased)\n2. Lease Type (Gross - Ground Lease)\n3. Lease Clauses:\n4. Responsible of payment (Landlord/Owner, Shared, Tenant or Subtenant):\n5. Responsibility (Pay, Record or Shared):\n6. Reimbursement (Yes, No)\n\nPlease provide all information separated by commas.'
+
+    return `📦 **Parcels - ${first.county_name} (1/${plan[0].remaining})**\n\nPlease provide:\n• parcel_id (unique)\n• payable_to\n• account\n• parcel (label)\n\nSeparate with commas.`
+  }
+
+  const processParcelDetails = async (userInput) => {
+    const fields = userInput.split(',').map(v => v.trim())
+    if (fields.length < 4) {
+      return '❌ Please provide 4 fields: parcel_id, payable_to, account, parcel'
+    }
+    const [parcel_id, payable_to, account, parcelLabel] = fields
+
+    if (!parcel_id) {
+      return '❌ "parcel_id" is required and must be unique.'
+    }
+
+    const { basicInfo, parcelSubflow } = propertyFlow.data
+    const current = parcelSubflow.current
+    const parcelData = {
+      parcel_id,
+      property: basicInfo.id,
+      county_id: current.county_id,
+      payable_to,
+      account,
+      parcel: parcelLabel
+    }
+
+    try {
+      const created = await parcelsService.create(parcelData)
+
+      const newPlan = parcelSubflow.plan.map(p =>
+        p.county_id === current.county_id ? { ...p, remaining: p.remaining - 1 } : p
+      )
+
+      let nextCurrent = null
+      let nextCounty = newPlan.find(p => p.county_id === current.county_id && p.remaining > 0)
+      if (nextCounty) {
+        nextCurrent = { county_id: nextCounty.county_id, county_name: nextCounty.county_name, index: (parcelSubflow.current.index || 1) + 1 }
+      } else {
+        nextCounty = newPlan.find(p => p.remaining > 0)
+        if (nextCounty) {
+          nextCurrent = { county_id: nextCounty.county_id, county_name: nextCounty.county_name, index: 1 }
+        }
+      }
+
+      if (nextCurrent) {
+        setPropertyFlow(prev => ({
+          ...prev,
+          data: {
+            ...prev.data,
+            parcels: [...prev.data.parcels, created],
+            parcelSubflow: { isActive: true, plan: newPlan, current: nextCurrent }
+          }
+        }))
+        const planned = newPlan.find(p => p.county_id === nextCurrent.county_id)
+        return `📦 **Parcels - ${nextCurrent.county_name} (${nextCurrent.index}/${planned.remaining + 1})**\n\nPlease provide: parcel_id, payable_to, account, parcel`
+      } else {
+        setPropertyFlow(prev => ({
+          ...prev,
+          step: 4,
+          data: {
+            ...prev.data,
+            parcels: [...prev.data.parcels, created],
+            parcelSubflow: { isActive: false, plan: [], current: null }
+          }
+        }))
+        return '✅ Parcels saved!\n\n**Step 4: Lease and Taxes Information**\n\n1. Tenancy Type (Leased, Owned or Subleased)\n2. Lease Type (Gross - Ground Lease)\n3. Lease Clauses:\n4. Responsible of payment (Landlord/Owner, Shared, Tenant or Subtenant):\n5. Responsibility (Pay, Record or Shared):\n6. Reimbursement (Yes, No)\n\nProvide all separated by commas.'
+      }
+    } catch (error) {
+      return `❌ Error saving parcel: ${error.message || error}`
+    }
   }
 
   const processTaxInfo = (userInput) => {
@@ -399,7 +504,7 @@ export default function PropertyTaxAgent() {
     return `✅ Descriptor: ${descriptor}\n\n**Step 4: County Code**\n\nPlease provide the County code or short label:`
   }
 
-  const processCountyCode = (userInput) => {
+  const processCountyCode = async (userInput) => {
     const countyCode = userInput.trim()
     if (!countyCode) {
       return '❌ Please provide a valid County code or short label.'
@@ -432,21 +537,19 @@ export default function PropertyTaxAgent() {
       
       return `⚠️ **County Already Exists**\n\nThis county already exists in ${countyData.state}:\n• County: ${existingCounty.county_name}\n• State: ${existingCounty.state}\n• Descriptor: ${existingCounty.descriptor}\n\nDo you want to use this existing county?\n\nType "Yes" to use existing county or "No" to create a new one with a different name.`
     } else {
-      // Crear nuevo county
-      const newCounty = {
-        id: counties.length + 1,
+      const createdCounty = await countiesService.create({
         county_name: countyData.countyName,
         state: countyData.state,
         descriptor: countyData.descriptor,
         county: countyCode
-      }
-      
+      })
+      setCounties(prev => [...prev, createdCounty])
       setPropertyFlow(prev => ({
         ...prev,
         step: 3,
         data: {
           ...prev.data,
-          counties: [...prev.data.counties, newCounty],
+          counties: [...prev.data.counties, createdCounty],
           countySubflow: {
             isActive: false,
             step: 0,
@@ -461,7 +564,7 @@ export default function PropertyTaxAgent() {
         }
       }))
       
-      return `✅ New county "${newCounty.county_name}" created successfully!\n\n**Step 3: Parcels Information**\n\nFor each county, please specify:\n• How many parcels does this county have?\n\nPlease provide the number of parcels for each county (e.g., "Harris County: 2, Dallas County: 1")`
+      return `✅ New county "${createdCounty.county_name}" created successfully!\n\n**Step 3: Parcels Information**\n\nFor each county, please specify:\n• How many parcels does this county have?\n\nPlease provide the number of parcels for each county (e.g., "Harris County: 2, Dallas County: 1")`
     }
   }
 
@@ -512,7 +615,7 @@ export default function PropertyTaxAgent() {
     }
   }
 
-  const processNewCountyName = (userInput) => {
+  const processNewCountyName = async (userInput) => {
     const newCountyName = userInput.trim()
     if (!newCountyName) {
       return '❌ Please provide a valid new county name.'
@@ -528,21 +631,19 @@ export default function PropertyTaxAgent() {
       return `❌ The county "${newCountyName}" also exists in ${propertyFlow.data.countySubflow.data.state}. Please enter a different name.`
     }
     
-    // Crear nuevo county con el nuevo nombre
-    const newCounty = {
-      id: counties.length + 1,
+    const createdCounty = await countiesService.create({
       county_name: newCountyName,
       state: propertyFlow.data.countySubflow.data.state,
       descriptor: propertyFlow.data.countySubflow.data.descriptor,
       county: propertyFlow.data.countySubflow.data.countyCode
-    }
-    
+    })
+    setCounties(prev => [...prev, createdCounty])
     setPropertyFlow(prev => ({
       ...prev,
       step: 3,
       data: {
         ...prev.data,
-        counties: [...prev.data.counties, newCounty],
+        counties: [...prev.data.counties, createdCounty],
         countySubflow: {
           isActive: false,
           step: 0,
@@ -557,7 +658,7 @@ export default function PropertyTaxAgent() {
       }
     }))
     
-    return `✅ New county "${newCounty.county_name}" created successfully!\n\n**Step 3: Parcels Information**\n\nFor each county, please specify:\n• How many parcels does this county have?\n\nPlease provide the number of parcels for each county (e.g., "Harris County: 2, Dallas County: 1")`
+    return `✅ New county "${createdCounty.county_name}" created successfully!\n\n**Step 3: Parcels Information**\n\nFor each county, please specify:\n• How many parcels does this county have?\n\nPlease provide the number of parcels for each county (e.g., "Harris County: 2, Dallas County: 1")`
   }
 
   // Funciones auxiliares para el flujo de Add New Bill
@@ -1511,10 +1612,64 @@ export default function PropertyTaxAgent() {
       return getMainMenu()
     }
 
+    // Quick API commands to test backend endpoints from UI
+    if (lowerMsg === 'api health') {
+      try {
+        const h = await apiService.health()
+        setIsProcessing(false)
+        return `✅ API Health: ${JSON.stringify(h)}`
+      } catch (e) {
+        setIsProcessing(false)
+        return `❌ API Health error: ${e.message}`
+      }
+    }
+    if (lowerMsg === 'api summary') {
+      try {
+        const r = await apiService.getPaymentsSummary()
+        setIsProcessing(false)
+        return `📊 Summary (API):\n${JSON.stringify(r.summary || r)}`
+      } catch (e) {
+        setIsProcessing(false)
+        return `❌ Summary error: ${e.message}`
+      }
+    }
+    if (lowerMsg === 'api pending') {
+      try {
+        const r = await apiService.getPendingBills()
+        const count = (r.parcel_taxes || []).length
+        setIsProcessing(false)
+        return `🧾 Pending bills (API): ${count}`
+      } catch (e) {
+        setIsProcessing(false)
+        return `❌ Pending bills error: ${e.message}`
+      }
+    }
+    if (lowerMsg.startsWith('api pay ')) {
+      try {
+        const parts = lowerMsg.split(/\s+/)
+        const billId = parseInt(parts[2])
+        const amount = parseFloat(parts[3])
+        if (!billId || !amount) {
+          setIsProcessing(false)
+          return '❌ Usage: api pay <parcel_taxes_id> <amount>'
+        }
+        const r = await apiService.registerPayment({ parcel_taxes_id: billId, amount_paid: amount })
+        setIsProcessing(false)
+        return `✅ Payment registered (API): id=${r.payment?.id || 'n/a'}`
+      } catch (e) {
+        setIsProcessing(false)
+        return `❌ Register payment error: ${e.message}`
+      }
+    }
+
     // Manejar flujo activo de Add New Property
     if (propertyFlow.isActive) {
+      // Subflujo de parcels
+      if (propertyFlow.data.parcelSubflow?.isActive) {
+        response = await processParcelDetails(userMessage)
+      }
       // Verificar si el subflujo de county está activo
-      if (propertyFlow.data.countySubflow.isActive) {
+      else if (propertyFlow.data.countySubflow.isActive) {
         switch (propertyFlow.data.countySubflow.step) {
           case 1:
             response = processCountyName(userMessage)
@@ -1526,13 +1681,13 @@ export default function PropertyTaxAgent() {
             response = processCountyDescriptor(userMessage)
             break
           case 4:
-            response = processCountyCode(userMessage)
+            response = await processCountyCode(userMessage)
             break
           case 5:
             response = processCountyExistsConfirmation(userMessage)
             break
           case 6:
-            response = processNewCountyName(userMessage)
+            response = await processNewCountyName(userMessage)
             break
           default:
             response = '❌ Error in county subflow. Please start over.'
@@ -1740,16 +1895,16 @@ export default function PropertyTaxAgent() {
               <div key={property.id} className="bg-gray-50 rounded-lg p-3 border border-gray-200">
                 <div className="flex items-start justify-between mb-2">
                   <p className="text-xs font-medium text-gray-700">{property.address}</p>
-                  {property.status === 'paid' ? (
+                  {(property.open_closed === 'Closed') ? (
                     <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
                   ) : (
                     <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0" />
                   )}
                 </div>
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-gray-600">Tax: ${property.taxAmount.toLocaleString()}</span>
-                  <span className={"px-2 py-1 rounded-full " + (property.status === 'paid' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700')}>
-                    {property.status === 'paid' ? 'Pagado' : 'Pendiente'}
+                  <span className="text-gray-600">Tax: ${((property.taxAmount || 0)).toLocaleString()}</span>
+                  <span className={"px-2 py-1 rounded-full " + ((property.open_closed === 'Closed') ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700')}>
+                    {(property.open_closed === 'Closed') ? 'Pagado' : 'Pendiente'}
                   </span>
                 </div>
               </div>
@@ -1765,15 +1920,15 @@ export default function PropertyTaxAgent() {
           <div className="space-y-1 text-sm">
             <div className="flex justify-between">
               <span>Total Anual:</span>
-              <span className="font-bold">${properties.reduce((sum, p) => sum + p.taxAmount, 0).toLocaleString()}</span>
+              <span className="font-bold">${properties.reduce((sum, p) => sum + (p.taxAmount || 0), 0).toLocaleString()}</span>
             </div>
             <div className="flex justify-between">
               <span>Pagado:</span>
-              <span className="font-bold">${properties.filter(p => p.status === 'paid').reduce((sum, p) => sum + p.taxAmount, 0).toLocaleString()}</span>
+              <span className="font-bold">${properties.filter(p => p.open_closed === 'Closed').reduce((sum, p) => sum + (p.taxAmount || 0), 0).toLocaleString()}</span>
             </div>
             <div className="flex justify-between border-t border-white/30 pt-1 mt-1">
               <span>Pendiente:</span>
-              <span className="font-bold">${properties.filter(p => p.status === 'pending').reduce((sum, p) => sum + p.taxAmount, 0).toLocaleString()}</span>
+              <span className="font-bold">${properties.filter(p => p.open_closed !== 'Closed').reduce((sum, p) => sum + (p.taxAmount || 0), 0).toLocaleString()}</span>
             </div>
           </div>
         </div>

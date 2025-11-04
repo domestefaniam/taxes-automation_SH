@@ -7,7 +7,7 @@ export const propertiesService = {
     const { data, error } = await supabase
       .from('properties')
       .select('*')
-      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
     
     if (error) throw error
     return data

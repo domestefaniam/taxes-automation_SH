@@ -1,12 +1,14 @@
 import express from 'express';
 import propertiesRoutes from './properties.js';
 import paymentsRoutes from './payments.js';
+import parcelTaxesRoutes from './parcelTaxes.js';
 
 const router = express.Router();
 
 // Use route modules
 router.use('/properties', propertiesRoutes);
 router.use('/payments', paymentsRoutes);
+router.use('/parcel-taxes', parcelTaxesRoutes);
 
 // Health check endpoint
 router.get('/health', (req, res) => {

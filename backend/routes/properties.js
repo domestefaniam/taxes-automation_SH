@@ -3,13 +3,13 @@ import supabase from '../supabaseClient.js';
 
 const router = express.Router();
 
-// GET /api/properties - Get all properties
+// GET /api/properties - Obtener todas las propiedades
 router.get('/', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('properties')
       .select('*')
-      .order('created_at', { ascending: false });
+      .order('id', { ascending: false });
 
     if (error) {
       return res.status(500).json({ error: error.message });
@@ -21,7 +21,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// GET /api/properties/:id - Get property by ID
+// GET /api/properties/:id - Obtener propiedad por ID
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -32,7 +32,7 @@ router.get('/:id', async (req, res) => {
       .eq('id', id)
       .single();
 
-    if (error) {
+    if (error || !data) {
       return res.status(404).json({ error: 'Property not found' });
     }
 
@@ -42,26 +42,47 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// POST /api/properties - Create new property
+// POST /api/properties - Crear nueva propiedad (conforme al esquema)
 router.post('/', async (req, res) => {
   try {
-    const { address, owner, tax_amount, status = 'pending' } = req.body;
+    const {
+      address,
+      state,
+      group_code,
+      co,
+      brand,
+      store_number,
+      zip,
+      vendor_id,
+      landlord,
+      open_closed
+    } = req.body;
 
-    if (!address || !owner || !tax_amount) {
+    if (!address || !state) {
       return res.status(400).json({ 
-        error: 'Missing required fields: address, owner, tax_amount' 
+        error: 'Missing required fields: address, state' 
       });
     }
 
+    // Construir payload evitando insertar undefined
+    const payload = {
+      address,
+      state,
+      group_code,
+      co,
+      brand,
+      store_number,
+      zip,
+      vendor_id,
+      landlord,
+      open_closed,
+      created_at: new Date().toISOString()
+    };
+    Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+
     const { data, error } = await supabase
       .from('properties')
-      .insert([{
-        address,
-        owner,
-        tax_amount,
-        status,
-        created_at: new Date().toISOString()
-      }])
+      .insert([payload])
       .select()
       .single();
 
