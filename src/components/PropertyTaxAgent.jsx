@@ -27,6 +27,7 @@ export default function PropertyTaxAgent() {
   ])
   const [input, setInput] = useState('')
   const [properties, setProperties] = useState([])
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear())
   const [counties, setCounties] = useState([])
   const [parcels, setParcels] = useState([])
   const [parcelTaxes, setParcelTaxes] = useState([])
@@ -39,12 +40,11 @@ export default function PropertyTaxAgent() {
     const loadInitialData = async () => {
       try {
         setIsLoading(true)
-        const [propertiesData, countiesData] = await Promise.all([
-          propertiesService.getAll(),
+        const [propertiesResp, countiesData] = await Promise.all([
+          apiService.getPropertiesWithTotals(selectedYear),
           countiesService.getAll()
         ])
-        
-        setProperties(propertiesData)
+        setProperties(propertiesResp.properties || [])
         setCounties(countiesData)
         setIsLoading(false)
       } catch (error) {
@@ -59,7 +59,14 @@ export default function PropertyTaxAgent() {
     }
     
     loadInitialData()
-  }, [])
+  }, [selectedYear])
+
+  const handleYearChange = async (e) => {
+    const yearValue = parseInt(e.target.value)
+    if (!isNaN(yearValue)) {
+      setSelectedYear(yearValue)
+    }
+  }
   
   // Estados para el flujo de Add New Property
   const [propertyFlow, setPropertyFlow] = useState({
@@ -382,7 +389,8 @@ export default function PropertyTaxAgent() {
           }
         }))
         const planned = newPlan.find(p => p.county_id === nextCurrent.county_id)
-        return `📦 **Parcels - ${nextCurrent.county_name} (${nextCurrent.index}/${planned.remaining + 1})**\n\nPlease provide: parcel_id, payable_to, account, parcel`
+        const totalForCounty = planned.remaining + (nextCurrent.index - 1)
+        return `📦 **Parcels - ${nextCurrent.county_name} (${nextCurrent.index}/${totalForCounty})**\n\nPlease provide: parcel_id, payable_to, account, parcel`
       } else {
         setPropertyFlow(prev => ({
           ...prev,
@@ -400,35 +408,30 @@ export default function PropertyTaxAgent() {
     }
   }
 
-  const processTaxInfo = (userInput) => {
+  const processTaxInfo = async (userInput) => {
     const values = userInput.split(',').map(v => v.trim())
     if (values.length < 6) {
       return '❌ Please provide all 6 required fields:\n\n1. Tenancy Type\n2. Lease Type\n3. Lease Clauses\n4. Responsible of payment\n5. Responsibility\n6. Reimbursement\n\nSeparate each field with a comma.'
     }
     
-    const taxInfo = {
-      tenancy_type: values[0],
-      lease_type: values[1],
-      lease_clauses: values[2],
-      responsible_of_payment: values[3],
-      responsibility: values[4],
-      reimbursement: values[5]
+    try {
+      const payload = {
+        property_id: propertyFlow.data.basicInfo.id,
+        tenancy_type: values[0],
+        lease_type: values[1],
+        lease_clauses: values[2],
+        responsible_of_payment: values[3],
+        responsibility: values[4],
+        reimbursement: /^(yes|true|1|si|sí)$/i.test(values[5])
+      }
+      await taxesInformationService.create(payload)
+
+      setPropertyFlow({ isActive: false, step: 0, data: {} })
+
+      return `🎉 **Your property has been saved successfully!**\n\nProperty Details:\n• Address: ${propertyFlow.data.basicInfo.address}\n• Group Code: ${propertyFlow.data.basicInfo.group_code}\n• Brand: ${propertyFlow.data.basicInfo.brand}\n• Store #: ${propertyFlow.data.basicInfo.store_number}\n• Counties: ${propertyFlow.data.counties.map(c => c.county_name).join(', ')}\n• Status: ${propertyFlow.data.basicInfo.open_closed}\n\nProperty ID: ${propertyFlow.data.basicInfo.id}\n\nWhat would you like to do next?`
+    } catch (error) {
+      return `❌ Error saving taxes information: ${error.message || error}`
     }
-    
-    // Simular inserción en base de datos
-    const newProperty = {
-      id: properties.length + 1,
-      address: propertyFlow.data.basicInfo.address,
-      owner: propertyFlow.data.basicInfo.landlord,
-      taxAmount: Math.floor(Math.random() * 5000) + 2000,
-      lastPaid: new Date().toISOString().split('T')[0],
-      status: propertyFlow.data.basicInfo.status === 'Open' ? 'paid' : 'pending'
-    }
-    
-    setProperties(prev => [...prev, newProperty])
-    setPropertyFlow({ isActive: false, step: 0, data: {} })
-    
-    return `🎉 **Your property has been saved successfully!**\n\nProperty Details:\n• Address: ${propertyFlow.data.basicInfo.address}\n• Group Code: ${propertyFlow.data.basicInfo.group_code}\n• Brand: ${propertyFlow.data.basicInfo.brand}\n• Store #: ${propertyFlow.data.basicInfo.store_number}\n• Counties: ${propertyFlow.data.counties.map(c => c.county_name).join(', ')}\n• Status: ${propertyFlow.data.basicInfo.status}\n\nProperty ID: ${newProperty.id}\n\nWhat would you like to do next?`
   }
 
   // Funciones auxiliares para el subflujo de Add New County
@@ -747,12 +750,12 @@ export default function PropertyTaxAgent() {
     }
   }
 
-  const processBillCount = (userInput) => {
+  const processBillCount = async (userInput) => {
     const count = parseInt(userInput.trim())
     if (isNaN(count) || count < 1) {
       return '❌ Please enter a valid number of bills (minimum 1).'
     }
-    
+
     setBillFlow(prev => ({
       ...prev,
       step: 5,
@@ -762,26 +765,53 @@ export default function PropertyTaxAgent() {
         bills: []
       }
     }))
-    
-    // Obtener parcels para la propiedad
-    const propertyParcels = parcels.filter(p => p.property === billFlow.data.property.id)
+
+    const propertyId = billFlow.data.property.id
+    let propertyParcels = parcels.filter(p => p.property === propertyId)
+    if (propertyParcels.length === 0) {
+      try {
+        const fetched = await parcelsService.getByProperty(propertyId)
+        setParcels(prev => {
+          const byId = new Map(prev.map(p => [p.id, p]))
+          fetched.forEach(p => byId.set(p.id, p))
+          return Array.from(byId.values())
+        })
+        propertyParcels = fetched
+      } catch (e) {
+        return `❌ Error loading parcels for the property: ${e.message || e}`
+      }
+    }
+
     const parcelsWithCounties = propertyParcels.map(p => {
-      const county = counties.find(c => c.id === p.county_id)
-      return { ...p, county_name: county ? county.county_name : 'Unknown County' }
+      const countyName = p.counties?.county_name || (counties.find(c => c.id === p.county_id)?.county_name) || 'Unknown County'
+      return { ...p, county_name: countyName }
     })
-    
+
     let response = `✅ ${count} bill(s) to register!\n\n**Bill 1 of ${count}**\n\nSelect the County and Parcel:\n\n`
     parcelsWithCounties.forEach((parcel, index) => {
       response += `${index + 1}. ${parcel.county_name} - ${parcel.parcel} (${parcel.payable_to})\n`
     })
-    
     response += '\nPlease select by number (e.g., "1")'
-    
     return response
   }
 
   const processBillParcelSelection = (userInput) => {
-    const parcelNumber = parseInt(userInput.trim())
+    const input = userInput.trim().toLowerCase()
+    if (input === 'list' || input === 'back') {
+      const propertyParcels = parcels.filter(p => p.property === billFlow.data.property.id)
+      const parcelsWithCounties = propertyParcels.map(p => {
+        const county = counties.find(c => c.id === p.county_id)
+        return { ...p, county_name: county ? county.county_name : 'Unknown County' }
+      })
+      let response = '🔁 Parcel list refreshed. Select the County and Parcel by number:\n\n'
+      parcelsWithCounties.forEach((parcel, index) => {
+        response += `${index + 1}. ${parcel.county_name} - ${parcel.parcel} (${parcel.payable_to})\n`
+      })
+      response += '\nPlease select by number (e.g., "1")'
+      return response
+    }
+
+    const parcelNumber = parseInt(input)
     const propertyParcels = parcels.filter(p => p.property === billFlow.data.property.id)
     const parcelsWithCounties = propertyParcels.map(p => {
       const county = counties.find(c => c.id === p.county_id)
@@ -806,7 +836,7 @@ export default function PropertyTaxAgent() {
     return `✅ Parcel selected: ${selectedParcel.county_name} - ${selectedParcel.parcel}\n\nEnter Year, Amount Due, Due Date\n\nPlease provide:\n• Year (e.g., 2024)\n• Amount Due (e.g., 3500)\n• Due Date (e.g., 2024-12-31)\n\nSeparate each field with a comma.`
   }
 
-  const processBillDetails = (userInput) => {
+  const processBillDetails = async (userInput) => {
     const values = userInput.split(',').map(v => v.trim())
     if (values.length < 3) {
       return '❌ Please provide all 3 required fields:\n\n• Year\n• Amount Due\n• Due Date\n\nSeparate each field with a comma.'
@@ -820,15 +850,21 @@ export default function PropertyTaxAgent() {
       return '❌ Please enter a valid amount due (positive number).'
     }
     
-    const newBill = {
-      parcel_id: billFlow.data.currentParcel.parcel_id,
-      year: year,
-      amount_due: amountDue,
-      due_date: dueDate,
-      status: 'pending'
+    // Crear bill via API backend
+    let createdBill
+    try {
+      const r = await apiService.createBill({
+        parcel_id: billFlow.data.currentParcel.id,
+        year,
+        amount_due: amountDue,
+        due_date: dueDate
+      })
+      createdBill = r.bill
+    } catch (e) {
+      return `❌ Error creating bill: ${e.message}`
     }
-    
-    const updatedBills = [...billFlow.data.bills, newBill]
+
+    const updatedBills = [...billFlow.data.bills, createdBill]
     const currentBillNumber = updatedBills.length
     
     if (currentBillNumber < billFlow.data.billsCount) {
@@ -848,7 +884,7 @@ export default function PropertyTaxAgent() {
         return { ...p, county_name: county ? county.county_name : 'Unknown County' }
       })
       
-      let response = `✅ Bill ${currentBillNumber} added!\n\n**Bill ${currentBillNumber + 1} of ${billFlow.data.billsCount}**\n\nSelect the County and Parcel:\n\n`
+      let response = `✅ Bill ${currentBillNumber} added (ID: ${createdBill.id}).\n\n**Bill ${currentBillNumber + 1} of ${billFlow.data.billsCount}**\n\nSelect the County and Parcel:\n\n`
       parcelsWithCounties.forEach((parcel, index) => {
         response += `${index + 1}. ${parcel.county_name} - ${parcel.parcel} (${parcel.payable_to})\n`
       })
@@ -862,9 +898,9 @@ export default function PropertyTaxAgent() {
       
       let response = `🎉 **Bill(s) added successfully!**\n\nSummary:\n`
       updatedBills.forEach((bill, index) => {
-        const parcel = parcels.find(p => p.parcel_id === bill.parcel_id)
-        const county = counties.find(c => c.id === parcel.county_id)
-        response += `\n**Bill ${index + 1}:**\n• County: ${county ? county.county_name : 'Unknown'}\n• Parcel: ${parcel ? parcel.parcel : 'Unknown'}\n• Year: ${bill.year}\n• Amount Due: $${bill.amount_due.toLocaleString()}\n• Due Date: ${bill.due_date}\n• Status: ${bill.status}`
+        const parcel = parcels.find(p => p.id === bill.parcel_id)
+        const county = parcel ? counties.find(c => c.id === parcel.county_id) : null
+        response += `\n**Bill ${index + 1}:**\n• ID: ${bill.id}\n• County: ${county ? county.county_name : 'Unknown'}\n• Parcel: ${parcel ? parcel.parcel : 'Unknown'}\n• Year: ${bill.year}\n• Amount Due: $${Number(bill.amount_due || 0).toLocaleString()}\n• Due Date: ${bill.due_date || ''}\n• Status: ${bill.status}`
       })
       
       response += '\n\nWhat would you like to do next?'
@@ -959,90 +995,90 @@ export default function PropertyTaxAgent() {
     }
   }
 
-  const processPaymentCount = (userInput) => {
+  const processPaymentCount = async (userInput) => {
     const count = parseInt(userInput.trim())
     if (isNaN(count) || count < 1) {
       return '❌ Please enter a valid number of payments (minimum 1).'
     }
-    
+
+    // Guardar conteo y avanzar de paso
     setPaymentFlow(prev => ({
       ...prev,
       step: 5,
-      data: { 
-        ...prev.data, 
+      data: {
+        ...prev.data,
         paymentsCount: count,
         payments: []
       }
     }))
-    
-    // Obtener bills pendientes para la propiedad
-    const propertyParcels = parcels.filter(p => p.property === paymentFlow.data.property.id)
-    const propertyParcelIds = propertyParcels.map(p => p.parcel_id)
-    const pendingBills = parcelTaxes.filter(pt => 
-      propertyParcelIds.includes(pt.parcel_id) && pt.status === 'pending'
-    )
-    
-    if (pendingBills.length === 0) {
+
+    // Traer bills pendientes desde el backend y filtrar por la propiedad actual
+    const propertyId = paymentFlow.data.property.id
+    let pendingForProperty = []
+    try {
+      const r = await apiService.getPendingBills()
+      const all = r.parcel_taxes || []
+      pendingForProperty = all.filter(b => b?.property?.id === propertyId)
+    } catch (e) {
+      return `❌ Error loading pending bills: ${e.message || e}`
+    }
+
+    if (pendingForProperty.length === 0) {
       setPaymentFlow({ isActive: false, step: 0, data: {} })
       return '❌ No pending bills found for this property. All bills are already paid.'
     }
-    
-    // Crear lista de bills con información completa
-    const billsWithDetails = pendingBills.map(bill => {
-      const parcel = parcels.find(p => p.parcel_id === bill.parcel_id)
-      const county = counties.find(c => c.id === parcel.county_id)
+
+    // Normalizar datos para UI
+    const billsWithDetails = pendingForProperty.map(b => {
+      const county = counties.find(c => c.id === (b.parcel ? b.parcel.county_id : undefined))
       return {
-        ...bill,
+        parcel_taxes_id: b.id,
+        year: b.year,
+        amount_due: b.amount_due,
+        due_date: b.due_date,
+        status: b.status,
         county_name: county ? county.county_name : 'Unknown County',
-        parcel: parcel ? parcel.parcel : 'Unknown Parcel'
+        parcel: b.parcel ? b.parcel.parcel : 'Unknown Parcel'
       }
     })
-    
+
+    // Guardar para uso en siguientes pasos
+    setPaymentFlow(prev => ({
+      ...prev,
+      data: {
+        ...prev.data,
+        pendingBills: billsWithDetails
+      }
+    }))
+
+    // Renderizar listado
     let response = `✅ ${count} payment(s) to register!\n\n**Payment 1 of ${count}**\n\nSelect County, Parcel, Year, and Bill:\n\n`
     billsWithDetails.forEach((bill, index) => {
-      response += `${index + 1}. ${bill.county_name} - ${bill.parcel} - Year ${bill.year} - $${bill.amount_due.toLocaleString()} (Due: ${bill.due_date})\n`
+      response += `${index + 1}. ${bill.county_name} - ${bill.parcel} - Year ${bill.year} - $${Number(bill.amount_due || 0).toLocaleString()} (Due: ${bill.due_date || ''})\n`
     })
-    
     response += '\nPlease select by number (e.g., "1")'
-    
     return response
   }
 
   const processPaymentBillSelection = (userInput) => {
     const billNumber = parseInt(userInput.trim())
-    
-    // Obtener bills pendientes para la propiedad
-    const propertyParcels = parcels.filter(p => p.property === paymentFlow.data.property.id)
-    const propertyParcelIds = propertyParcels.map(p => p.parcel_id)
-    const pendingBills = parcelTaxes.filter(pt => 
-      propertyParcelIds.includes(pt.parcel_id) && pt.status === 'pending'
-    )
-    
-    const billsWithDetails = pendingBills.map(bill => {
-      const parcel = parcels.find(p => p.parcel_id === bill.parcel_id)
-      const county = counties.find(c => c.id === parcel.county_id)
-      return {
-        ...bill,
-        county_name: county ? county.county_name : 'Unknown County',
-        parcel: parcel ? parcel.parcel : 'Unknown Parcel'
-      }
-    })
-    
+
+    const billsWithDetails = paymentFlow.data.pendingBills || []
     if (isNaN(billNumber) || billNumber < 1 || billNumber > billsWithDetails.length) {
       return '❌ Please select a valid bill number.'
     }
-    
+
     const selectedBill = billsWithDetails[billNumber - 1]
-    
+
     setPaymentFlow(prev => ({
       ...prev,
       step: 6,
-      data: { 
-        ...prev.data, 
+      data: {
+        ...prev.data,
         currentBill: selectedBill
       }
     }))
-    
+
     return `✅ Bill selected: ${selectedBill.county_name} - ${selectedBill.parcel} - Year ${selectedBill.year}\n\nPlease register your payment details:\n\n• Base Amount (e.g., 3500)\n• Late Fees (e.g., 0 or 50)\n• Transaction Fees (e.g., 0 or 25)\n• Total Paid (e.g., 3500)\n• Payment Date (e.g., 2024-11-15)\n• Confirmation Number (e.g., TXN123456)\n• Paid By (e.g., John Doe)\n\nSeparate each field with a comma.`
   }
 
@@ -1743,13 +1779,13 @@ export default function PropertyTaxAgent() {
           response = processBillPropertyConfirmation(userMessage)
           break
         case 4:
-          response = processBillCount(userMessage)
+          response = await processBillCount(userMessage)
           break
         case 5:
           response = processBillParcelSelection(userMessage)
           break
         case 6:
-          response = processBillDetails(userMessage)
+          response = await processBillDetails(userMessage)
           break
         default:
           response = '❌ Error in bill flow. Please start over.'
@@ -1769,7 +1805,7 @@ export default function PropertyTaxAgent() {
           response = processPaymentPropertyConfirmation(userMessage)
           break
         case 4:
-          response = processPaymentCount(userMessage)
+          response = await processPaymentCount(userMessage)
           break
         case 5:
           response = processPaymentBillSelection(userMessage)
@@ -1886,6 +1922,19 @@ export default function PropertyTaxAgent() {
         </div>
 
         <div className="mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <label className="text-xs text-gray-600 mr-2">Año</label>
+            <select
+              className="text-xs border border-gray-300 rounded-md px-2 py-1"
+              value={selectedYear}
+              onChange={handleYearChange}
+            >
+              {[0,1,2,3].map(off => {
+                const y = new Date().getFullYear() - off
+                return <option key={y} value={y}>{y}</option>
+              })}
+            </select>
+          </div>
           <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center">
             <Home className="w-4 h-4 mr-2" />
             Tus Propiedades ({properties.length})
@@ -1895,17 +1944,21 @@ export default function PropertyTaxAgent() {
               <div key={property.id} className="bg-gray-50 rounded-lg p-3 border border-gray-200">
                 <div className="flex items-start justify-between mb-2">
                   <p className="text-xs font-medium text-gray-700">{property.address}</p>
-                  {(property.open_closed === 'Closed') ? (
+                  {(property.general_status === 'complete') ? (
                     <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
                   ) : (
                     <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0" />
                   )}
                 </div>
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-gray-600">Tax: ${((property.taxAmount || 0)).toLocaleString()}</span>
-                  <span className={"px-2 py-1 rounded-full " + ((property.open_closed === 'Closed') ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700')}>
-                    {(property.open_closed === 'Closed') ? 'Pagado' : 'Pendiente'}
+                  <span className="text-gray-600">Due: ${Number(property.amount_due_total || 0).toLocaleString()}</span>
+                  <span className={"px-2 py-1 rounded-full " + ((property.general_status === 'complete') ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700')}>
+                    {(property.general_status === 'complete') ? 'Pagado' : 'Pendiente'}
                   </span>
+                </div>
+                <div className="flex items-center justify-between text-xs mt-1">
+                  <span className="text-gray-600">Paid: ${Number(property.amount_paid_total || 0).toLocaleString()}</span>
+                  <span className="text-gray-500">Año {property.year}</span>
                 </div>
               </div>
             ))}
@@ -1919,16 +1972,20 @@ export default function PropertyTaxAgent() {
           </h3>
           <div className="space-y-1 text-sm">
             <div className="flex justify-between">
-              <span>Total Anual:</span>
-              <span className="font-bold">${properties.reduce((sum, p) => sum + (p.taxAmount || 0), 0).toLocaleString()}</span>
+              <span>Total Año ({selectedYear}):</span>
+              <span className="font-bold">${properties.reduce((sum, p) => sum + Number(p.amount_due_total || 0), 0).toLocaleString()}</span>
             </div>
             <div className="flex justify-between">
               <span>Pagado:</span>
-              <span className="font-bold">${properties.filter(p => p.open_closed === 'Closed').reduce((sum, p) => sum + (p.taxAmount || 0), 0).toLocaleString()}</span>
+              <span className="font-bold">${properties.reduce((sum, p) => sum + Number(p.amount_paid_total || 0), 0).toLocaleString()}</span>
             </div>
             <div className="flex justify-between border-t border-white/30 pt-1 mt-1">
               <span>Pendiente:</span>
-              <span className="font-bold">${properties.filter(p => p.open_closed !== 'Closed').reduce((sum, p) => sum + (p.taxAmount || 0), 0).toLocaleString()}</span>
+              <span className="font-bold">${properties.reduce((sum, p) => {
+                const due = Number(p.amount_due_total || 0)
+                const paid = Number(p.amount_paid_total || 0)
+                return sum + Math.max(due - paid, 0)
+              }, 0).toLocaleString()}</span>
             </div>
           </div>
         </div>

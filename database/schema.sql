@@ -15,9 +15,13 @@ CREATE TABLE IF NOT EXISTS counties (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Modify the name of the columns: county to base name  and descriptor to specific 
+
+
+
 -- Properties table
 CREATE TABLE IF NOT EXISTS properties (
-    id SERIAL PRIMARY KEY,
+    id SERIAL PRIMARY KEY, --Unique identifier for each property
     group_code VARCHAR(50),
     co VARCHAR(100),
     brand VARCHAR(100),
@@ -31,21 +35,30 @@ CREATE TABLE IF NOT EXISTS properties (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+-- Add lease end date
+
+
+
 
 -- Parcels table
 CREATE TABLE IF NOT EXISTS parcels (
-    id SERIAL PRIMARY KEY,
-    parcel_id VARCHAR(100) UNIQUE NOT NULL,
+    id SERIAL PRIMARY KEY, -- Unique ID created by Supabase
+    parcel_id VARCHAR(100) UNIQUE NOT NULL,   -- configure it for it could clean the parcel
     property INTEGER REFERENCES properties(id) ON DELETE CASCADE,
     county_id INTEGER REFERENCES counties(id) ON DELETE CASCADE,
-    payable_to VARCHAR(255),
+    payable_to VARCHAR(255), -- 
     account VARCHAR(100),
-    parcel VARCHAR(100),
+    parcel VARCHAR(100), --
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Taxes information table
+-- Change parcel to parcel detail (details of the parcel (GEO ID, Parcel, etc)
+-- Add Type of Tax (RE/BPP)
+
+
+
+-- Taxes information table (RE taxes details)
 CREATE TABLE IF NOT EXISTS taxes_information (
     id SERIAL PRIMARY KEY,
     property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
@@ -59,6 +72,14 @@ CREATE TABLE IF NOT EXISTS taxes_information (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Add assessed_value
+-- Add sq_ft 
+-- Add market
+-- Add acquired-new
+---Add predecessor_name
+
+
+
 -- Parcel taxes table (bills)
 CREATE TABLE IF NOT EXISTS parcel_taxes (
     id SERIAL PRIMARY KEY,
@@ -71,6 +92,16 @@ CREATE TABLE IF NOT EXISTS parcel_taxes (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Add statement link to upload the statement (sharepoint)
+-- Add Document reference, status of the information of the bill
+-- Add Bill Number
+-- Add Soure of the information ('county statement', 'county web page', 'ryan')
+-- Add discount_date
+
+
+-- Add a Table for Scrapping website information (Web Page Link, Amount), last_checked, last_status 
+
 
 -- Payments table
 CREATE TABLE IF NOT EXISTS payments (
@@ -87,6 +118,11 @@ CREATE TABLE IF NOT EXISTS payments (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+--Add comments field
+
+
+
 
 -- Create indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_properties_state ON properties(state);

@@ -3,6 +3,17 @@ import supabase from '../supabaseClient.js';
 
 const router = express.Router();
 
+// Log de diagnóstico para todas las peticiones a este router
+router.use((req, res, next) => {
+  console.log(`[parcel-taxes] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+// GET /api/parcel-taxes - Diagnóstico de ruta base
+router.get('/', (req, res) => {
+  res.json({ route: '/api/parcel-taxes', status: 'OK', methods: ['GET /', 'GET /pending', 'POST /', 'POST (alias)'] });
+});
+
 // GET /api/parcel-taxes/pending - Listar facturas pendientes con datos relacionados
 router.get('/pending', async (req, res) => {
   try {
@@ -67,6 +78,61 @@ router.get('/pending', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// Handler crear bill
+async function createBill(req, res) {
+  try {
+    const { parcel_id, year, amount_due, due_date, status } = req.body;
+
+    if (!parcel_id || !year || !amount_due) {
+      return res.status(400).json({ 
+        error: 'Missing required fields: parcel_id, year, amount_due' 
+      });
+    }
+
+    // Validar que el parcel existe
+    const { data: parcel, error: parcelError } = await supabase
+      .from('parcels')
+      .select('id, parcel_id')
+      .eq('parcel_id', parcel_id)
+      .single();
+    if (parcelError || !parcel) {
+      return res.status(404).json({ error: 'Parcel not found' });
+    }
+
+    const random = Math.random().toString(36).slice(2, 8).toUpperCase();
+    const parcel_taxes_id = `TAX-${new Date().getFullYear()}-${random}`;
+
+    const payload = {
+      parcel_taxes_id,
+      parcel_id: parcel.id,
+      year: Number(year),
+      amount_due: Number(amount_due),
+      due_date: due_date || null,
+      status: status || 'pending',
+      created_at: new Date().toISOString()
+    };
+
+    const { data, error } = await supabase
+      .from('parcel_taxes')
+      .insert([payload])
+      .select()
+      .single();
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.status(201).json({ bill: data });
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// POST /api/parcel-taxes - Crear nueva factura (bill)
+router.post('/', createBill);
+// Alias explícito (por si algún entorno interpreta distinto la raíz)
+router.post('', createBill);
 
 export default router;
 
